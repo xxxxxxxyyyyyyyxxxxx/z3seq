@@ -238,6 +238,7 @@ namespace smt {
            \brief return up to 2^depth cubes to case split on.
         */
         expr_ref_vector cubes(unsigned depth);
+        expr_ref_vector cubes(unsigned depth, int id);
 
         /**
            \brief access congruence closure

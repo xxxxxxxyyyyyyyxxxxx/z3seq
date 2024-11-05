@@ -354,10 +354,10 @@ class parallel_tactic : public tactic {
             if (max_conflicts < 1000000)
                 max_conflicts *= std::max(m_depth, 1u);
             p.set_uint("inprocess.max", pp.simplify_inprocess_max() * mult);
-            p.set_uint("restart.max",15);
+            p.set_uint("restart.max", 15);
             p.set_bool("lookahead_simplify", m_depth > 2);
             p.set_bool("retain_blocked_clauses", retain_blocked);
-            p.set_uint("max_conflicts",600);
+            p.set_uint("max_conflicts", 600);
             if (m_depth > 1) p.set_uint("bce_delay", 0);
             get_solver().updt_params(p);
         }
@@ -515,7 +515,7 @@ private:
         close_branch(s, l_undef);
     }
 
-    void cube_and_conquer(solver_state& s) {
+    void cube_and_conquer(solver_state& s, int id) {
         ast_manager& m = s.m();
         vector<cube_var> cube, hard_cubes, cubes;
         expr_ref_vector vars(m);
@@ -544,10 +544,11 @@ private:
         // simplify
         s.inc_depth(1);
         if (canceled(s)) return;
-        switch (s.simplify()) {
+        lbool r = s.simplify();
+        switch (r) {
         case l_undef: break;
         case l_true:  report_sat(s, nullptr); return;
-        case l_false: report_unsat(s); return;                
+        case l_false:  report_unsat(s); return;                
         }
         if (canceled(s)) return;
         if (s.giveup()) { report_undef(s, s.get_solver().reason_unknown()); return; }
@@ -564,7 +565,7 @@ private:
         bool first = true;
         unsigned num_backtracks = 0, width = 0;
         while (cutoff > 0 && !canceled(s)) {
-            expr_ref_vector c = s.get_solver().cube(vars, cutoff);
+            expr_ref_vector c = s.get_solver().cube(vars, cutoff, id);
             if (c.empty() || (cube.size() == 1 && m.is_true(c.back()))) {
                 if (num_simplifications > 1) {
                     report_undef(s, std::string("cube simplifications exceeded")); 
@@ -617,7 +618,6 @@ private:
                 cubes.reset();
             }
         }
-
         if (conquer) {
             collect_statistics(*conquer.get());
         }
@@ -698,10 +698,10 @@ private:
         return memory::above_high_watermark();
     }
 
-    void run_solver() {
+    void run_solver(int i) {
         try {
             while (solver_state* st = m_queue.get_task()) {
-                cube_and_conquer(*st);                
+                cube_and_conquer(*st, i);                
                 collect_statistics(*st);
                 m_queue.task_done(st);
                 if (!st->m().inc()) m_queue.shutdown();
@@ -737,7 +737,7 @@ private:
         add_branches(1);
         vector<std::thread> threads;
         for (unsigned i = 0; i < m_num_threads; ++i) 
-            threads.push_back(std::thread([this]() { run_solver(); }));
+            threads.push_back(std::thread([this, i]() { run_solver(i); }));
         for (std::thread& t : threads) 
             t.join();
         m_queue.stats(m_stats);

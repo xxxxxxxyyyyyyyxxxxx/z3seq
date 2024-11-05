@@ -207,6 +207,10 @@ namespace smt {
         lookahead lh(m_imp->m_kernel);
         return lh.choose_rec(depth);
     }        
+    expr_ref_vector kernel::cubes(unsigned depth, int id) {
+        lookahead lh(m_imp->m_kernel);
+        return lh.choose_rec(depth, id);
+    }        
 
     std::ostream& kernel::display(std::ostream & out) const {
         m_imp->display(out);
