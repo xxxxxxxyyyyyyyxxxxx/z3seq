@@ -28,6 +28,7 @@ Notes:
  
 --*/
 
+#include <map>
 #include "util/scoped_ptr_vector.h"
 #include "ast/ast_pp.h"
 #include "ast/ast_util.h"
@@ -37,8 +38,10 @@ Notes:
 #include "tactic/tactic.h"
 #include "tactic/tactical.h"
 #include "solver/parallel_tactical.h"
+#include <chrono>
 #include "solver/parallel_params.hpp"
 
+std::mutex g_output_mutex;
 
 class non_parallel_tactic : public tactic {
 public:
@@ -66,14 +69,16 @@ tactic * mk_parallel_tactic(solver* s, params_ref const& p) {
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <string>
 #include <cmath>
 #include <condition_variable>
 
+bool first_solver=true;
+std::vector<std::string> features;
 class parallel_tactic : public tactic {
 
 
     class solver_state; 
-
     class task_queue {
         std::mutex                   m_mutex;
         std::condition_variable      m_cond;
@@ -213,7 +218,6 @@ class parallel_tactic : public tactic {
 
     class solver_state {
         scoped_ptr<ast_manager> m_manager;        // ownership handle to ast_manager
-        vector<cube_var> m_cubes;                 // set of cubes to process by task
         expr_ref_vector m_asserted_cubes;         // set of cubes asserted on the current solver
         expr_ref_vector m_assumptions;            // set of auxiliary assumptions passed in
         params_ref      m_params;                 // configuration parameters
@@ -223,6 +227,7 @@ class parallel_tactic : public tactic {
         bool            m_giveup;
 
     public:
+        vector<cube_var> m_cubes;                 // set of cubes to process by task
         solver_state(ast_manager* m, solver* s, params_ref const& p): 
             m_manager(m),
             m_asserted_cubes(s->get_manager()),
@@ -267,13 +272,18 @@ class parallel_tactic : public tactic {
         vector<cube_var> const& cubes() const { return m_cubes; }
 
         // remove up to n cubes from list of cubes.
-        vector<cube_var> split_cubes(unsigned n) {
+        vector<cube_var> split_cubes(unsigned n, std::string& feature ,int& id) {
             vector<cube_var> result;
             while (n-- > 0 && !m_cubes.empty()) {
                 DEBUG_CODE(for (expr* c : m_cubes.back().cube()) SASSERT(c););
+            // verbose_stream() << "when taking the size id " << m_cubes.size() << "\n";
+            // verbose_stream() << mk_pp(m_cubes.back().cube().get(0), *m_manager) << "\n";
+                id = m_cubes.size();
                 result.push_back(m_cubes.back());
+                feature = features.back();
 
                 m_cubes.pop_back();
+                features.pop_back();
             }
             return result;
         }
@@ -357,7 +367,10 @@ class parallel_tactic : public tactic {
             p.set_uint("restart.max", pp.simplify_restart_max() * mult);
             p.set_bool("lookahead_simplify", m_depth > 2);
             p.set_bool("retain_blocked_clauses", retain_blocked);
-            p.set_uint("max_conflicts", max_conflicts);
+            if(first_solver)
+                p.set_uint("max_conflicts", 650);
+            else
+                p.set_uint("max_conflicts", 900);
             if (m_depth > 1) p.set_uint("bce_delay", 0);
             get_solver().updt_params(p);
         }
@@ -514,29 +527,43 @@ private:
         }
         close_branch(s, l_undef);
     }
+    std::string vec2str(std::vector<double> v) {
+        std::stringstream temp;
+        temp << " [ ";
+        for(int i=0; i<v.size(); i++) {
+            temp << v[i] << " ";
+            if(i != v.size()-1) {
+                temp << ", ";
+            }
+        }
+        temp << "]";
+        return temp.str();
+    }
 
     void cube_and_conquer(solver_state& s) {
         ast_manager& m = s.m();
         vector<cube_var> cube, hard_cubes, cubes;
         expr_ref_vector vars(m);
         unsigned num_simplifications = 0;
+        
 
     cube_again:
         if (canceled(s)) return;
-        // extract up to one cube and add it.
         cube.reset();
-        cube.append(s.split_cubes(1));
+        int id;
+        std::string feature;
+        cube.append(s.split_cubes(1, feature, id));
         SASSERT(cube.size() <= 1);
         IF_VERBOSE(2, verbose_stream() << "(tactic.parallel :split-cube " << cube.size() << ")\n";);
         {
-            // std::lock_guard<std::mutex> lock(m_mutex);
+            std::lock_guard<std::mutex> lock(m_mutex);
             if (!s.cubes().empty()) m_queue.add_task(s.clone());
         }
         if (!cube.empty()) {
             s.assert_cube(cube.get(0).cube());
             vars.reset();
             vars.append(cube.get(0).vars());
-        }
+        }else if (!first_solver) {return;}
         num_simplifications = 0;
 
     simplify_again:
@@ -544,96 +571,41 @@ private:
         // simplify
         s.inc_depth(1);
         if (canceled(s)) return;
-        switch (s.simplify()) {
-        case l_undef: break;
-        case l_true:  report_sat(s, nullptr); return;
-        case l_false: report_unsat(s); return;                
+        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+        lbool res = s.simplify();
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+        if(!first_solver){
+            std::chrono::duration<double> elapsed_seconds = end - begin;
+            std::unique_lock<std::mutex> lock(g_output_mutex);
+            verbose_stream() << id << " " <<  res << " " <<  elapsed_seconds.count() << feature << "\n";
         }
         if (canceled(s)) return;
-        if (s.giveup()) { report_undef(s, s.get_solver().reason_unknown()); return; }
-        
-        if (memory_pressure()) {
-            goto simplify_again;
-        }
-        // extract cubes.
-        cubes.reset();
-        s.set_cube_params();
-        solver_ref conquer;
-        
-        unsigned cutoff = UINT_MAX;
-        bool first = true;
-        unsigned num_backtracks = 0, width = 0;
-        while (cutoff > 0 && !canceled(s)) {
-            expr_ref_vector c = s.get_solver().cube(vars, cutoff);
-            if (c.empty() || (cube.size() == 1 && m.is_true(c.back()))) {
-                if (num_simplifications > 1) {
-                    report_undef(s, std::string("cube simplifications exceeded")); 
-                    return;
-                }
-                goto simplify_again;
+        if(first_solver && res == l_undef) {
+            first_solver = false;
+            std::vector<std::vector<double>> X;
+            expr_ref_vector candidates(m);
+            candidates = s.get_solver().cube(vars, UINT_MAX, X);
+            int i =0;
+            for(auto& c: candidates) {
+                expr_ref_vector cube1(m);
+                cube1.push_back(c);
+                cube_var cv1(cube1, vars);
+                cubes.push_back(cv1);
+                unsigned id = c->get_id();
+                features.push_back(vec2str(X[i]));
+                expr_ref_vector cube2(m);
+                app* nc = m.mk_not(c);
+                cube2.push_back(nc);
+                cube_var cv2(cube2, vars);
+                cubes.push_back(cv2);
+                id = nc->get_id();
+                features.push_back(vec2str(X[i]));
+                i++;
             }
-            if (m.is_false(c.back())) {                
-                break;
-            }
-            lbool is_sat = l_undef;
-            if (!s.has_assumptions() && width >= m_conquer_delay && !conquer) {
-                conquer = s.copy_solver();
-                s.set_conquer_params(*conquer.get());
-            }
-            if (conquer) {
-                is_sat = conquer->check_sat(c);
-            }
-            DEBUG_CODE(for (expr* e : c) SASSERT(e););
-            switch (is_sat) {
-            case l_false: 
-                cutoff = c.size();
-                backtrack(*conquer.get(), c, (num_backtracks++) % m_backtrack_frequency == 0);
-                if (cutoff != c.size()) {
-                    IF_VERBOSE(0, verbose_stream() << "(tactic.parallel :backtrack " << cutoff << " -> " << c.size() << ")\n");
-                    cutoff = c.size();
-                }
-                inc_unsat(s);
-                log_branches(l_false);
-                break;
-
-            case l_true:
-                report_sat(s, conquer.get());
-                if (conquer) {
-                    collect_statistics(*conquer.get());
-                }
-                return;
-
-            case l_undef:
-                ++width;
-                IF_VERBOSE(2, verbose_stream() << "(tactic.parallel :cube " << c.size() << " :vars " << vars.size() << ")\n"); 
-                cubes.push_back(cube_var(c, vars));
-                cutoff = UINT_MAX;
-                break;
-
-            }
-            if (cubes.size() >= conquer_batch_size()) {
-                spawn_cubes(s, 10*width, cubes);
-                first = false;
-                cubes.reset();
-            }
-        }
-
-        if (conquer) {
-            collect_statistics(*conquer.get());
-        }
-
-        if (cubes.empty() && first) {
-            report_unsat(s);
-        }
-        else if (cubes.empty()) {
-            dec_branch();
-        }
-        else {
-            s.inc_width(width);
-            add_branches(cubes.size()-1);
             s.set_cubes(cubes);
-            goto cube_again;
-        }                
+            m_queue.add_task(s.clone());
+            return ;
+        }
     }
 
     void spawn_cubes(solver_state& s, unsigned width, vector<cube_var>& cubes) {
@@ -642,7 +614,6 @@ private:
         s.set_cubes(cubes);        
         solver_state* s1 = nullptr;
         {
-            // std::lock_guard<std::mutex> lock(m_mutex);
             s1 = s.clone();
         }
         s1->inc_width(width);

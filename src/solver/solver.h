@@ -237,6 +237,7 @@ public:
     */
 
     virtual expr_ref_vector cube(expr_ref_vector& vars, unsigned backtrack_level) = 0;
+    virtual expr_ref_vector cube(expr_ref_vector& vars, unsigned backtrack_level, std::vector<std::vector<double>>& X){ return expr_ref_vector(get_manager()); };
 
     /**
        \brief retrieve congruence closure root.

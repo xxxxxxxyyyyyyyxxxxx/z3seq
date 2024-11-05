@@ -42,6 +42,20 @@ namespace {
                 m_round(0),
                 m_result(s.get_manager()),
                 m_depth(s.m_smt_params.m_cube_depth) {}
+            expr_ref cube(int id) {
+                if (m_round == 0) {
+                    // m_result = m_solver.m_context.cubes(m_depth, id);
+                }
+                expr_ref r(m_result.m());
+                if (m_round < m_result.size()) {
+                    r = m_result.get(m_round);
+                }
+                else {
+                    r = m_result.m().mk_false();
+                }
+                ++m_round;
+                return r;
+            }
             expr_ref cube() {
                 if (m_round == 0) {
                     m_result = m_solver.m_context.cubes(m_depth);
@@ -339,6 +353,13 @@ namespace {
         expr* congruence_root(expr* e) override { return m_context.congruence_root(e); }
 
 
+        expr_ref_vector cube(expr_ref_vector& vars, unsigned cutoff, std::vector< std::vector<double> >& X) override {
+            ast_manager& m = get_manager();
+            expr_ref_vector lits(m);
+            lits = m_context.cubes(1, X);
+            verbose_stream() << "there are " << lits.size() << " literals\n";
+            return lits;
+        }
         expr_ref_vector cube(expr_ref_vector& vars, unsigned cutoff) override {
             ast_manager& m = get_manager();
             if (!m_cuber) {
@@ -361,6 +382,7 @@ namespace {
             lits.push_back(result);
             return lits;
         }
+
 
         struct collect_fds_proc {
             ast_manager & m;
