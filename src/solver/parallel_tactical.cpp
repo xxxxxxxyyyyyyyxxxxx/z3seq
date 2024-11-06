@@ -38,6 +38,13 @@ Notes:
 #include "tactic/tactical.h"
 #include "solver/parallel_tactical.h"
 #include "solver/parallel_params.hpp"
+#include <chrono>
+
+std::chrono::duration<double> duration_search;
+std::mutex duration_search_mutex;
+std::chrono::duration<double> duration_pred;
+std::mutex duration_pred_mutex;
+std::mutex output_mutex;
 
 
 class non_parallel_tactic : public tactic {
@@ -354,10 +361,10 @@ class parallel_tactic : public tactic {
             if (max_conflicts < 1000000)
                 max_conflicts *= std::max(m_depth, 1u);
             p.set_uint("inprocess.max", pp.simplify_inprocess_max() * mult);
-            p.set_uint("restart.max", pp.simplify_restart_max() * mult);
+            p.set_uint("restart.max",30);
             p.set_bool("lookahead_simplify", m_depth > 2);
             p.set_bool("retain_blocked_clauses", retain_blocked);
-            p.set_uint("max_conflicts", max_conflicts);
+            p.set_uint("max_conflicts",10000000);
             if (m_depth > 1) p.set_uint("bce_delay", 0);
             get_solver().updt_params(p);
         }
@@ -544,7 +551,14 @@ private:
         // simplify
         s.inc_depth(1);
         if (canceled(s)) return;
-        switch (s.simplify()) {
+        std::chrono::high_resolution_clock::time_point start2, end2;
+        start2 = std::chrono::high_resolution_clock::now();
+        lbool r = s.simplify();
+        end2 = std::chrono::high_resolution_clock::now(); 
+        duration_search_mutex.lock();
+        duration_search += end2 - start2;
+        duration_search_mutex.unlock();
+        switch (r) {
         case l_undef: break;
         case l_true:  report_sat(s, nullptr); return;
         case l_false: report_unsat(s); return;                
@@ -563,6 +577,8 @@ private:
         unsigned cutoff = UINT_MAX;
         bool first = true;
         unsigned num_backtracks = 0, width = 0;
+        std::chrono::high_resolution_clock::time_point start, end;
+        start = std::chrono::high_resolution_clock::now();
         while (cutoff > 0 && !canceled(s)) {
             expr_ref_vector c = s.get_solver().cube(vars, cutoff);
             if (c.empty() || (cube.size() == 1 && m.is_true(c.back()))) {
@@ -617,10 +633,19 @@ private:
                 cubes.reset();
             }
         }
+        end = std::chrono::high_resolution_clock::now();
+        duration_pred_mutex.lock();
+        duration_pred += end - start;
+        duration_pred_mutex.unlock();
+        std::chrono::duration<double> this_pred = end - start;
+        output_mutex.lock();
+        verbose_stream() << "pred: " << this_pred.count() << "\n";
+        output_mutex.unlock();
 
         if (conquer) {
             collect_statistics(*conquer.get());
         }
+
 
         if (cubes.empty() && first) {
             report_unsat(s);
@@ -740,6 +765,9 @@ private:
             threads.push_back(std::thread([this]() { run_solver(); }));
         for (std::thread& t : threads) 
             t.join();
+        verbose_stream() << "duration_pred: " << duration_pred.count() << "\n";
+        verbose_stream() << "duration_all: " << duration_search.count() << "\n";
+        verbose_stream() << "ratio: " << duration_pred.count() / (duration_search.count()  + duration_pred.count())<< "\n";  
         m_queue.stats(m_stats);
         m_manager.limit().reset_cancel();
         if (m_exn_code == -1) 
