@@ -1270,7 +1270,8 @@ namespace smt {
         
         TRACE("str_fl", tout << "calling subsolver" << std::endl;);
 
-        lbool subproblem_status = subsolver.check(fixed_length_assumptions);
+        lbool subproblem_status = l_undef;
+        // lbool subproblem_status = subsolver.check(fixed_length_assumptions);
 
         if (subproblem_status == l_true) {
             TRACE("str_fl", tout << "subsolver found SAT; reconstructing model" << std::endl;);

@@ -3981,6 +3981,7 @@ namespace smt {
                     log_stats();
                     return l_true;
                 case FC_CONTINUE:
+                    return l_undef;
                     break;
                 case FC_GIVEUP:
                     return l_undef;
